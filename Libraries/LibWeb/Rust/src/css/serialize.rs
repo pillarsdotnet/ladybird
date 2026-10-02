@@ -3522,6 +3522,58 @@ fn serialize_shorthand(
         }
         return true;
     }
+    // https://drafts.csswg.org/motion-1/#offset-shorthand
+    if shorthand_property == property_id::OFFSET {
+        let (Some(position), Some(path), Some(distance), Some(rotate), Some(anchor)) = (
+            longhand(property_id::OFFSET_POSITION),
+            longhand(property_id::OFFSET_PATH),
+            longhand(property_id::OFFSET_DISTANCE),
+            longhand(property_id::OFFSET_ROTATE),
+            longhand(property_id::OFFSET_ANCHOR),
+        ) else {
+            return false;
+        };
+        let is_keyword = |value: &StyleValueData, expected: u16| matches!(value, StyleValueData::Keyword { keyword: code } if *code == expected);
+        let distance_is_default = matches!(distance, StyleValueData::Length { value, .. } if *value == 0.0);
+        // "auto 0deg" rotates exactly as "auto" does.
+        let rotate_is_default = is_keyword(rotate, keyword::AUTO)
+            || matches!(rotate, StyleValueData::ValueList { values, .. } if matches!(
+                values.as_slice(),
+                [path_keyword, angle] if is_keyword(path_keyword.data(), keyword::AUTO)
+                    && matches!(angle.data(), StyleValueData::Angle { value, .. } if *value == 0.0)
+            ));
+
+        // Each component is omitted while it has its initial value, but offset-path is kept ahead of a distance or
+        // rotation that follows it, and as the whole value when everything else is omitted.
+        let mut parts = Vec::new();
+        if !is_keyword(position, keyword::NORMAL) {
+            parts.push(position);
+        }
+        if !is_keyword(path, keyword::NONE) || !distance_is_default || !rotate_is_default || parts.is_empty() {
+            parts.push(path);
+            if !distance_is_default {
+                parts.push(distance);
+            }
+            if !rotate_is_default {
+                parts.push(rotate);
+            }
+        }
+        for (index, part) in parts.into_iter().enumerate() {
+            if index > 0 {
+                sink.push_ascii(" ");
+            }
+            if !serialize_style_value(sink, part, mode) {
+                return false;
+            }
+        }
+        if !is_keyword(anchor, keyword::AUTO) {
+            sink.push_ascii(" / ");
+            if !serialize_style_value(sink, anchor, mode) {
+                return false;
+            }
+        }
+        return true;
+    }
     if shorthand_property == property_id::COLUMNS {
         let (Some(width), Some(count), Some(height)) = (
             longhand(property_id::COLUMN_WIDTH).and_then(&sub_sink),

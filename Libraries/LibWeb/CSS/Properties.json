@@ -3606,6 +3606,16 @@
     ],
     "percentages-resolve-to": "length"
   },
+  "offset": {
+    "initial": "normal none 0 auto / auto",
+    "longhands": [
+      "offset-position",
+      "offset-path",
+      "offset-distance",
+      "offset-rotate",
+      "offset-anchor"
+    ]
+  },
   "offset-anchor": {
     "style-group": "TransformValues",
     "affects-accumulated-visual-contexts": true,

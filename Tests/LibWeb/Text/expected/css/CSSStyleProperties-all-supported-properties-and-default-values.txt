@@ -701,6 +701,7 @@ All supported properties and their default values exposed from CSSStylePropertie
 'object-fit': 'fill'
 'objectPosition': '50% 50%'
 'object-position': '50% 50%'
+'offset': 'none'
 'offsetAnchor': 'auto'
 'offset-anchor': 'auto'
 'offsetDistance': '0px'

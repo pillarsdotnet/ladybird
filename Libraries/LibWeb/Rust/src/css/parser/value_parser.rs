@@ -1666,6 +1666,122 @@ fn parse_contain_intrinsic_size_shorthand(
     }))
 }
 
+// https://drafts.csswg.org/motion-1/#offset-shorthand
+// [ <'offset-position'>? [ <'offset-path'> [ <'offset-distance'> || <'offset-rotate'> ]? ]? ]! [ / <'offset-anchor'> ]?
+fn parse_offset_shorthand(context: &ParseContext, property: u16, values: &[ComponentValue]) -> ParseOutcome {
+    if property != property_id::OFFSET {
+        return ParseOutcome::NotHandled;
+    }
+
+    // Each longhand takes a run of one or more component values, so every way of dividing the values into runs is
+    // tried, and each run is parsed as its longhand would parse it. A run is sliced from the declaration itself so
+    // that it keeps its whitespace.
+    let significant = values
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| !value.is_whitespace())
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let run = |start: usize, end: usize| &values[significant[start]..=significant[end - 1]];
+    let parse_run = |longhand: u16, start: usize, end: usize| -> Option<StyleValueData> {
+        if start >= end || parse_builtin_value(run(start, end)).is_some() {
+            return None;
+        }
+        match parse_css_value(context, longhand, run(start, end)) {
+            ParseOutcome::Parsed(value) => Some((*value).clone()),
+            ParseOutcome::Invalid | ParseOutcome::NotHandled => None,
+        }
+    };
+
+    let slash = significant.iter().position(|&index| values[index].is_delim(b'/'));
+    let main_end = slash.unwrap_or(significant.len());
+    let anchor = match slash {
+        Some(slash) => match parse_run(property_id::OFFSET_ANCHOR, slash + 1, significant.len()) {
+            Some(anchor) => Some(anchor),
+            None => return ParseOutcome::Invalid,
+        },
+        None => None,
+    };
+
+    // <'offset-distance'> || <'offset-rotate'>, where offset-rotate takes one or two component values.
+    let parse_distance_and_rotate =
+        |start: usize, end: usize| -> Option<(Option<StyleValueData>, Option<StyleValueData>)> {
+            if start == end {
+                return Some((None, None));
+            }
+            if let Some(distance) = parse_run(property_id::OFFSET_DISTANCE, start, start + 1) {
+                if start + 1 == end {
+                    return Some((Some(distance), None));
+                }
+                if let Some(rotate) = parse_run(property_id::OFFSET_ROTATE, start + 1, end) {
+                    return Some((Some(distance), Some(rotate)));
+                }
+            }
+            for rotate_end in start + 1..=end.min(start + 2) {
+                let Some(rotate) = parse_run(property_id::OFFSET_ROTATE, start, rotate_end) else {
+                    continue;
+                };
+                if rotate_end == end {
+                    return Some((None, Some(rotate)));
+                }
+                if rotate_end + 1 == end
+                    && let Some(distance) = parse_run(property_id::OFFSET_DISTANCE, rotate_end, end)
+                {
+                    return Some((Some(distance), Some(rotate)));
+                }
+            }
+            None
+        };
+
+    let mut parsed = None;
+    // A <position> takes at most four component values. Longer positions are tried first, so that "left bottom" is
+    // not read as "left" followed by a path.
+    'positions: for position_end in (0..=main_end.min(4)).rev() {
+        let position = if position_end == 0 {
+            None
+        } else {
+            match parse_run(property_id::OFFSET_POSITION, 0, position_end) {
+                Some(position) => Some(position),
+                None => continue,
+            }
+        };
+        if position_end == main_end {
+            if position.is_some() {
+                parsed = Some((position, None, None, None));
+                break;
+            }
+            continue;
+        }
+        // An <'offset-path'> is a path, a <coord-box>, or both.
+        for path_end in (position_end + 1..=main_end.min(position_end + 2)).rev() {
+            let Some(path) = parse_run(property_id::OFFSET_PATH, position_end, path_end) else {
+                continue;
+            };
+            if let Some((distance, rotate)) = parse_distance_and_rotate(path_end, main_end) {
+                parsed = Some((position, Some(path), distance, rotate));
+                break 'positions;
+            }
+        }
+    }
+    let Some((position, path, distance, rotate)) = parsed else {
+        return ParseOutcome::Invalid;
+    };
+
+    let longhands = longhands_for_shorthand(property);
+    let mut longhand_values = Vec::with_capacity(longhands.len());
+    for (&longhand, value) in longhands.iter().zip([position, path, distance, rotate, anchor]) {
+        let Some(value) = value.or_else(|| parse_initial_longhand(context, longhand)) else {
+            return ParseOutcome::Invalid;
+        };
+        longhand_values.push(value);
+    }
+    ParseOutcome::Parsed(shared_style_value(shorthand_value(
+        property,
+        longhands.to_vec(),
+        longhand_values,
+    )))
+}
+
 // https://drafts.csswg.org/css-sizing-4/#intrinsic-size-override
 // FIXME: auto parses and computes here, but doesn't change layout yet: "If auto is specified and the element has a
 //        last remembered size and is currently skipping its contents, its explicit intrinsic inner size in the
@@ -5459,6 +5575,10 @@ fn parse_css_value_after_substitution_scan(
             return outcome;
         }
         let outcome = parse_contain_intrinsic_size_shorthand(context, property_id, values);
+        if !matches!(outcome, ParseOutcome::NotHandled) {
+            return outcome;
+        }
+        let outcome = parse_offset_shorthand(context, property_id, values);
         if !matches!(outcome, ParseOutcome::NotHandled) {
             return outcome;
         }
