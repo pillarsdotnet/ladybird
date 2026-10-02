@@ -11,7 +11,7 @@ use super::component_value::{ComponentKind, ComponentValue};
 use super::token_stream::TokenStream;
 use super::value_parser::{
     NumericRange, ParseContext, ParseOutcome, equals_ascii_case_insensitive, parse_length_from_stream,
-    parse_length_percentage_from_stream, parse_number_from_stream,
+    parse_length_percentage_from_stream, parse_number_from_stream, parse_url_value,
 };
 use crate::css::css_enums::{keyword, keyword_from_ascii_case_insensitive};
 use crate::css::css_path::CssPath;
@@ -1088,6 +1088,71 @@ fn parse_shape_outside(context: &ParseContext, property: u16, values: &[Componen
     }
 }
 
+// https://drafts.csswg.org/motion-1/#offset-path-property
+// none | <offset-path> || <coord-box>
+// <offset-path> = <ray()> | <url> | <basic-shape>
+// FIXME: Parse ray().
+fn parse_offset_path(context: &ParseContext, property: u16, values: &[ComponentValue]) -> Option<StyleValueData> {
+    let significant = values.iter().filter(|value| !value.is_whitespace()).collect::<Vec<_>>();
+    if let [value] = significant.as_slice()
+        && let Some(none) = keyword_value(value, &[keyword::NONE])
+    {
+        return Some(none);
+    }
+
+    // https://drafts.csswg.org/css-box-4/#typedef-coord-box
+    let coord_box = |value: &ComponentValue| {
+        keyword_value(
+            value,
+            &[
+                keyword::CONTENT_BOX,
+                keyword::PADDING_BOX,
+                keyword::BORDER_BOX,
+                keyword::FILL_BOX,
+                keyword::STROKE_BOX,
+                keyword::VIEW_BOX,
+            ],
+        )
+    };
+
+    let mut path = None;
+    let mut box_value = None;
+    for value in significant {
+        if let Some(parsed) = coord_box(value) {
+            if box_value.replace(parsed).is_some() {
+                return None;
+            }
+            continue;
+        }
+        // An offset path has no inside to fill, so path() does not take a <fill-rule> here.
+        if let Some((name, arguments)) = value.function()
+            && equals_ascii_case_insensitive(name, b"path")
+            && arguments.iter().any(ComponentValue::is_comma)
+        {
+            return None;
+        }
+        let parsed = parse_url_value(context, value)
+            .or_else(|| parse_basic_shape(context, property, std::slice::from_ref(value)))?;
+        if path.replace(parsed).is_some() {
+            return None;
+        }
+    }
+
+    // border-box is the default <coord-box>, so it is omitted after a path to give the shortest serialization.
+    let box_value = box_value.filter(|value| {
+        path.is_none() || !matches!(value, StyleValueData::Keyword { keyword } if *keyword == keyword::BORDER_BOX)
+    });
+    match (path, box_value) {
+        (Some(path), Some(box_value)) => Some(StyleValueData::ValueList {
+            values: RetainedStyleValueDataList::from_retained_values(vec![retained(path), retained(box_value)]),
+            separator: 0,
+            collapsible: false,
+        }),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
 fn is_border_radius_longhand(property: u16) -> bool {
     matches!(
         property,
@@ -1559,6 +1624,8 @@ pub(crate) fn parse_geometry_property(
             return ParseOutcome::NotHandled;
         }
         parse_shape_outside(context, property, values)
+    } else if property == property_id::OFFSET_PATH {
+        parse_offset_path(context, property, values)
     } else if property == property_id::D {
         if let Some(value) = values
             .iter()
@@ -1601,6 +1668,20 @@ pub(crate) fn parse_position_property(
     property: u16,
     values: &[ComponentValue],
 ) -> ParseOutcome {
+    // https://drafts.csswg.org/motion-1/#offset-position-property
+    // https://drafts.csswg.org/motion-1/#offset-anchor-property
+    let offset_keywords: &[u16] = match property {
+        property_id::OFFSET_POSITION => &[keyword::AUTO, keyword::NORMAL],
+        property_id::OFFSET_ANCHOR => &[keyword::AUTO],
+        _ => &[],
+    };
+    let significant = values.iter().filter(|value| !value.is_whitespace()).collect::<Vec<_>>();
+    if let [value] = significant.as_slice()
+        && let Some(parsed) = keyword_value(value, offset_keywords)
+    {
+        return ParseOutcome::Parsed(Arc::new(parsed));
+    }
+
     let parsed = if property == property_id::BACKGROUND_POSITION {
         parse_background_position(context, property, values)
     } else if matches!(

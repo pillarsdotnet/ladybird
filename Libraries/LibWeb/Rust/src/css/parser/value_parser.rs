@@ -234,6 +234,10 @@ fn property_uses_special_keyword_parser(property: u16) -> bool {
             | property_id::MASK_REPEAT
             | property_id::MASK_SIZE
             | property_id::MATH_DEPTH
+            | property_id::OFFSET_ANCHOR
+            | property_id::OFFSET_PATH
+            | property_id::OFFSET_POSITION
+            | property_id::OFFSET_ROTATE
             | property_id::OVERFLOW
             | property_id::OVERFLOW_CLIP_MARGIN_BLOCK_END
             | property_id::OVERFLOW_CLIP_MARGIN_BLOCK_START

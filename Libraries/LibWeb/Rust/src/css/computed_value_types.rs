@@ -722,6 +722,12 @@ pub struct TransformValues {
     pub rotate: ComputedStyleValueHandle,
     pub translate: ComputedStyleValueHandle,
     pub scale: ComputedStyleValueHandle,
+    /// The Motion Path properties. Each handle is empty while the property has its initial value.
+    pub offset_path: ComputedStyleValueHandle,
+    pub offset_distance: ComputedStyleValueHandle,
+    pub offset_position: ComputedStyleValueHandle,
+    pub offset_anchor: ComputedStyleValueHandle,
+    pub offset_rotate: ComputedStyleValueHandle,
     pub has_perspective: bool,
     pub perspective_px: i32,
     pub perspective_origin_x: ComputedStyleValueHandle,

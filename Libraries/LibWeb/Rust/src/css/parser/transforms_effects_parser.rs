@@ -290,6 +290,50 @@ fn parse_rotate(context: &ParseContext, property: u16, values: &[ComponentValue]
     None
 }
 
+// https://drafts.csswg.org/motion-1/#offset-rotate-property
+// [ auto | reverse ] || <angle>
+fn parse_offset_rotate(context: &ParseContext, property: u16, values: &[ComponentValue]) -> Option<StyleValueData> {
+    use crate::css::css_enums::keyword;
+
+    let path_keyword = |value: &ComponentValue| {
+        let ident = value.ident()?;
+        if equals_ascii_case_insensitive(ident, b"auto") {
+            Some(keyword::AUTO)
+        } else if equals_ascii_case_insensitive(ident, b"reverse") {
+            Some(keyword::REVERSE)
+        } else {
+            None
+        }
+    };
+
+    let values = non_whitespace(values);
+    let (path_keyword, angle) = match values.as_slice() {
+        [value] => match path_keyword(value) {
+            Some(keyword) => (Some(keyword), None),
+            None => (None, Some(parse_angle_argument(context, property, value, false)?)),
+        },
+        [first, second] => match (path_keyword(first), path_keyword(second)) {
+            (Some(keyword), None) => (
+                Some(keyword),
+                Some(parse_angle_argument(context, property, second, false)?),
+            ),
+            (None, Some(keyword)) => (
+                Some(keyword),
+                Some(parse_angle_argument(context, property, first, false)?),
+            ),
+            _ => return None,
+        },
+        _ => return None,
+    };
+
+    match (path_keyword, angle) {
+        (Some(keyword), None) => Some(StyleValueData::Keyword { keyword }),
+        (None, Some(angle)) => Some(angle),
+        (Some(keyword), Some(angle)) => Some(value_list(vec![StyleValueData::Keyword { keyword }, angle], 0, false)),
+        (None, None) => None,
+    }
+}
+
 fn parse_translate(context: &ParseContext, property: u16, values: &[ComponentValue]) -> Option<StyleValueData> {
     let values = non_whitespace(values);
     if !(1..=3).contains(&values.len()) {
@@ -790,6 +834,7 @@ pub(crate) fn parse_transform_effect_property(
         property_id::ROTATE => keyword_none(values).or_else(|| parse_rotate(context, property, values)),
         property_id::TRANSLATE => keyword_none(values).or_else(|| parse_translate(context, property, values)),
         property_id::SCALE => keyword_none(values).or_else(|| parse_scale(context, property, values)),
+        property_id::OFFSET_ROTATE => parse_offset_rotate(context, property, values),
         property_id::ANIMATION_TIMING_FUNCTION | property_id::TRANSITION_TIMING_FUNCTION => {
             parse_easing_list(context, property, values)
         }

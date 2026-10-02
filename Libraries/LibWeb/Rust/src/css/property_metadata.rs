@@ -339,6 +339,11 @@ pub(crate) fn property_computed_dependents(property: u16) -> Option<&'static [u1
         | prop::MIX_BLEND_MODE
         | prop::OBJECT_FIT
         | prop::OBJECT_POSITION
+        | prop::OFFSET_ANCHOR
+        | prop::OFFSET_DISTANCE
+        | prop::OFFSET_PATH
+        | prop::OFFSET_POSITION
+        | prop::OFFSET_ROTATE
         | prop::OPACITY
         | prop::PERSPECTIVE
         | prop::PERSPECTIVE_ORIGIN

@@ -3044,6 +3044,7 @@ fn property_has_dedicated_compute_rule(property_id: u16) -> bool {
             | prop::WORD_SPACING
             | prop::LINE_HEIGHT
             | prop::MATH_DEPTH
+            | prop::OFFSET_ROTATE
             | prop::POSITION_AREA
             | prop::TRANSFORM_ORIGIN
     )
@@ -3114,6 +3115,47 @@ fn compute_animation_name(value: &StyleValueData) -> Option<Arc<StyleValueData>>
 /// top and left compute to 0%, center computes to 50%, and bottom and right
 /// compute to 100%. A None return means the value is already computed.
 #[allow(clippy::arc_with_non_send_sync)]
+// https://drafts.csswg.org/motion-1/#offset-rotate-property
+// Computed value: computed <angle> value, optionally preceded by auto
+// reverse is identical to auto, but adds an additional 180deg to the rotation.
+fn compute_offset_rotate(value: &StyleValueData) -> Option<Arc<StyleValueData>> {
+    use crate::css::calc::ANGLE_UNIT_CANONICAL_RATIOS;
+
+    let angle_in_degrees = match value {
+        StyleValueData::Keyword { keyword } if *keyword == keyword::REVERSE => 0.0,
+        StyleValueData::ValueList { values, .. } => match values.as_slice() {
+            [path_keyword, angle] => match (path_keyword.data(), angle.data()) {
+                (StyleValueData::Keyword { keyword }, StyleValueData::Angle { value, unit })
+                    if *keyword == keyword::REVERSE =>
+                {
+                    value * ANGLE_UNIT_CANONICAL_RATIOS[*unit as usize]
+                }
+                _ => return None,
+            },
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let degrees_unit = ANGLE_UNIT_CANONICAL_RATIOS
+        .iter()
+        .position(|&ratio| ratio == 1.0)
+        .expect("angle has a canonical unit") as u8;
+    let retain = |value: StyleValueData| unsafe {
+        RetainedStyleValueData::from_retained_pointer(Arc::into_raw(Arc::new(value)))
+    };
+    Some(Arc::new(StyleValueData::ValueList {
+        values: RetainedStyleValueDataList::from_retained_values(vec![
+            retain(StyleValueData::Keyword { keyword: keyword::AUTO }),
+            retain(StyleValueData::Angle {
+                value: angle_in_degrees + 180.0,
+                unit: degrees_unit,
+            }),
+        ]),
+        separator: 0,
+        collapsible: false,
+    }))
+}
+
 fn compute_transform_origin(value: &StyleValueData) -> Option<Arc<StyleValueData>> {
     let StyleValueData::ValueList {
         values,
@@ -4431,9 +4473,20 @@ pub(crate) unsafe fn drive_property_computation(
                             None => NativeValue::Unsupported,
                         }
                     }
-                    (None, prop::TRANSFORM_ORIGIN) => {
-                        let resolution_context =
-                            length_resolution_context.expect("transform-origin requires a length resolution context");
+                    // A lone keyword or an already resolved angle needs no absolutization, but reverse still
+                    // computes to auto with an added 180deg.
+                    (Some(_), prop::OFFSET_ROTATE) => match compute_offset_rotate(value_data) {
+                        Some(value) => NativeValue::StyleValue(value),
+                        None => NativeValue::Unchanged,
+                    },
+                    (None, prop::TRANSFORM_ORIGIN | prop::OFFSET_ROTATE) => {
+                        let compute = if inherited_property_id == prop::OFFSET_ROTATE {
+                            compute_offset_rotate
+                        } else {
+                            compute_transform_origin
+                        };
+                        let resolution_context = length_resolution_context
+                            .expect("transform-origin and offset-rotate require a length resolution context");
                         let absolutization_context = crate::css::absolutize::AbsolutizationContext {
                             length: resolution_context,
                             scheme: current_effective_color_scheme,
@@ -4448,14 +4501,12 @@ pub(crate) unsafe fn drive_property_computation(
                             results.depends_on_viewport_metrics = true;
                         }
                         match absolutized {
-                            Some(crate::css::absolutize::Absolutized::Unchanged) => {
-                                match compute_transform_origin(value_data) {
-                                    Some(value) => NativeValue::StyleValue(value),
-                                    None => NativeValue::Unchanged,
-                                }
-                            }
+                            Some(crate::css::absolutize::Absolutized::Unchanged) => match compute(value_data) {
+                                Some(value) => NativeValue::StyleValue(value),
+                                None => NativeValue::Unchanged,
+                            },
                             Some(crate::css::absolutize::Absolutized::Changed(value)) => {
-                                let computed = compute_transform_origin(value.data());
+                                let computed = compute(value.data());
                                 NativeValue::StyleValue(computed.unwrap_or_else(|| value.into_arc()))
                             }
                             None => NativeValue::Unsupported,

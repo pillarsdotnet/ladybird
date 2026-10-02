@@ -1243,6 +1243,25 @@ unsafe fn build_transform_group(
         _ => unreachable!("computed transform-origin is a three-value list"),
     };
 
+    // https://drafts.csswg.org/motion-1/
+    // Each handle stays empty while its property has the initial value, as in TransformValues::initial().
+    let offset_property = |property: u16, initial_keyword: u16| match values.value(property) {
+        Some(StyleValueData::Keyword { keyword: code }) if *code == initial_keyword => {
+            ComputedStyleValueHandle::empty()
+        }
+        Some(_) => retained(property),
+        None => ComputedStyleValueHandle::empty(),
+    };
+    let offset_path = offset_property(property_id::OFFSET_PATH, keyword::NONE);
+    let offset_distance = match values.value(property_id::OFFSET_DISTANCE) {
+        Some(StyleValueData::Length { value, .. }) if *value == 0.0 => ComputedStyleValueHandle::empty(),
+        Some(_) => retained(property_id::OFFSET_DISTANCE),
+        None => ComputedStyleValueHandle::empty(),
+    };
+    let offset_position = offset_property(property_id::OFFSET_POSITION, keyword::NORMAL);
+    let offset_anchor = offset_property(property_id::OFFSET_ANCHOR, keyword::AUTO);
+    let offset_rotate = offset_property(property_id::OFFSET_ROTATE, keyword::AUTO);
+
     let (has_perspective, perspective_px) = match values.value(property_id::PERSPECTIVE) {
         Some(StyleValueData::Keyword { keyword: code }) if *code == keyword::NONE => (false, 0),
         Some(data) => (true, length_to_css_pixels(data).raw_value()),
@@ -1277,6 +1296,11 @@ unsafe fn build_transform_group(
                 payload.rotate = rotate;
                 payload.translate = translate;
                 payload.scale = scale;
+                payload.offset_path = offset_path;
+                payload.offset_distance = offset_distance;
+                payload.offset_position = offset_position;
+                payload.offset_anchor = offset_anchor;
+                payload.offset_rotate = offset_rotate;
                 payload.has_perspective = has_perspective;
                 payload.perspective_px = perspective_px;
                 payload.perspective_origin_x = perspective_origin_x;
