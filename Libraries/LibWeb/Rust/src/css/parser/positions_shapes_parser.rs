@@ -10,8 +10,8 @@
 use super::component_value::{ComponentKind, ComponentValue};
 use super::token_stream::TokenStream;
 use super::value_parser::{
-    NumericRange, ParseContext, ParseOutcome, equals_ascii_case_insensitive, parse_length_from_stream,
-    parse_length_percentage_from_stream, parse_number_from_stream, parse_url_value,
+    NumericRange, ParseContext, ParseOutcome, equals_ascii_case_insensitive, parse_angle_from_stream,
+    parse_length_from_stream, parse_length_percentage_from_stream, parse_number_from_stream, parse_url_value,
 };
 use crate::css::css_enums::{keyword, keyword_from_ascii_case_insensitive};
 use crate::css::css_path::CssPath;
@@ -1088,10 +1088,87 @@ fn parse_shape_outside(context: &ParseContext, property: u16, values: &[Componen
     }
 }
 
+// https://drafts.csswg.org/motion-1/#ray-function
+// ray() = ray( <angle> && <ray-size>? && contain? && [at <position>]? )
+// <ray-size> = closest-side | closest-corner | farthest-side | farthest-corner | sides
+//
+// The ray is kept as a ray() function around its parts in canonical order: the angle, the size unless it is the
+// default closest-side, contain, and "at" followed by the position.
+fn parse_ray(context: &ParseContext, property: u16, arguments: &[ComponentValue]) -> Option<StyleValueData> {
+    let mut angle = None;
+    let mut size = None;
+    let mut contain = None;
+    let mut position = None;
+
+    let mut tokens = TokenStream::new(arguments);
+    loop {
+        tokens.discard_whitespace();
+        if !tokens.has_next_token() {
+            break;
+        }
+        let token = tokens.next_token();
+        if token
+            .ident()
+            .is_some_and(|ident| equals_ascii_case_insensitive(ident, b"at"))
+        {
+            tokens.discard_a_token();
+            let parsed = parse_position_from_stream(context, property, &mut tokens, false)?;
+            if position.replace(parsed).is_some() {
+                return None;
+            }
+        } else if let Some(parsed) = keyword_value(
+            token,
+            &[
+                keyword::CLOSEST_SIDE,
+                keyword::CLOSEST_CORNER,
+                keyword::FARTHEST_SIDE,
+                keyword::FARTHEST_CORNER,
+                keyword::SIDES,
+            ],
+        ) {
+            tokens.discard_a_token();
+            if size.replace(parsed).is_some() {
+                return None;
+            }
+        } else if let Some(parsed) = keyword_value(token, &[keyword::CONTAIN]) {
+            tokens.discard_a_token();
+            if contain.replace(parsed).is_some() {
+                return None;
+            }
+        } else {
+            let parsed = parse_angle_from_stream(context, property, &mut tokens, NumericRange::INFINITE)?;
+            if angle.replace(parsed).is_some() {
+                return None;
+            }
+        }
+    }
+
+    let mut parts = vec![angle?];
+    if let Some(size) = size
+        && !matches!(size, StyleValueData::Keyword { keyword } if keyword == keyword::CLOSEST_SIDE)
+    {
+        parts.push(size);
+    }
+    parts.extend(contain);
+    if let Some(position) = position {
+        parts.push(StyleValueData::CustomIdent {
+            custom_ident: CssString::from_utf16(&"at".encode_utf16().collect::<Vec<_>>()),
+        });
+        parts.push(position);
+    }
+    Some(StyleValueData::Function {
+        name: CssString::from_utf16(&"ray".encode_utf16().collect::<Vec<_>>()),
+        value: retained(StyleValueData::ValueList {
+            values: RetainedStyleValueDataList::from_retained_values(parts.into_iter().map(retained).collect()),
+            separator: 0,
+            collapsible: false,
+        }),
+    })
+}
+
 // https://drafts.csswg.org/motion-1/#offset-path-property
 // none | <offset-path> || <coord-box>
 // <offset-path> = <ray()> | <url> | <basic-shape>
-// FIXME: Parse ray().
 fn parse_offset_path(context: &ParseContext, property: u16, values: &[ComponentValue]) -> Option<StyleValueData> {
     let significant = values.iter().filter(|value| !value.is_whitespace()).collect::<Vec<_>>();
     if let [value] = significant.as_slice()
@@ -1131,8 +1208,14 @@ fn parse_offset_path(context: &ParseContext, property: u16, values: &[ComponentV
         {
             return None;
         }
-        let parsed = parse_url_value(context, value)
-            .or_else(|| parse_basic_shape(context, property, std::slice::from_ref(value)))?;
+        let parsed = if let Some((name, arguments)) = value.function()
+            && equals_ascii_case_insensitive(name, b"ray")
+        {
+            parse_ray(context, property, arguments)
+        } else {
+            parse_url_value(context, value)
+                .or_else(|| parse_basic_shape(context, property, std::slice::from_ref(value)))
+        }?;
         if path.replace(parsed).is_some() {
             return None;
         }
