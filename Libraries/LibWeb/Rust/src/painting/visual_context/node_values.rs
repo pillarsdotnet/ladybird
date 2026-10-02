@@ -8,8 +8,8 @@ use super::{ClipData, EffectsData, PerspectiveData, TransformData, TransformData
 use crate::css::computed_value_types::{ComputedClipEdge, ComputedStyleValueHandle};
 use crate::css::computed_value_views::{ComputedValuesView, LengthPercentageRef};
 use crate::css::css_enums;
-use crate::css::css_pixels::CssPixelRect;
 use crate::css::css_pixels::CssPixels;
+use crate::css::css_pixels::{CssPixelPoint, CssPixelRect};
 use crate::css::style_value::StyleValueData;
 use crate::layout::node_data::NodeSlotId;
 use crate::layout::node_facts;
@@ -133,6 +133,300 @@ pub(crate) fn multiply_transform_functions(
     matrix
 }
 
+/// The offset distance in pixels, where 100% is the given path length. Unlike LengthPercentageRef::to_px(), this
+/// keeps the fraction of a pixel that a percentage of a path length resolves to.
+fn offset_distance_px(offset_distance: &ComputedStyleValueHandle, path_length: f32) -> f32 {
+    let Some(distance) = offset_distance.length_percentage() else {
+        return 0.0;
+    };
+    if distance.is_calculated() {
+        return crate::css::computed_value_views::resolve_calc_to_px_without_rounding(
+            distance.calculated_pointer(),
+            CssPixels::nearest_value_for_f32(path_length),
+        ) as f32;
+    }
+    if distance.contains_percentage() {
+        return (f64::from(path_length) * distance.as_fraction()) as f32;
+    }
+    distance.absolute_length_to_px().to_float()
+}
+
+// https://drafts.csswg.org/motion-1/#ray-function
+/// The offset position and path direction, in radians, of a ray() offset path.
+// FIXME: Clamp the distance for contain, so that the box lies entirely within the path.
+fn position_along_ray(
+    ray: &[crate::css::style_value::RetainedStyleValueData],
+    containing_block_rect: CssPixelRect,
+    offset_starting_position: Option<CssPixelPoint>,
+    offset_distance: &ComputedStyleValueHandle,
+) -> Option<([f32; 2], f32)> {
+    use crate::css::calc::ANGLE_UNIT_CANONICAL_RATIOS;
+    use css_enums::keyword;
+
+    let StyleValueData::Angle { value, unit } = ray.first()?.data() else {
+        return None;
+    };
+    let angle = (value * ANGLE_UNIT_CANONICAL_RATIOS[*unit as usize]).to_radians() as f32;
+    let mut size = keyword::CLOSEST_SIDE;
+    let mut position = None;
+    for (index, part) in ray.iter().enumerate().skip(1) {
+        match part.data() {
+            StyleValueData::Keyword { keyword } if *keyword != keyword::CONTAIN => size = *keyword,
+            StyleValueData::CustomIdent { .. } => position = ray.get(index + 1).map(|position| position.data()),
+            _ => {}
+        }
+    }
+
+    // The ray starts at its "at <position>", or else at the offset starting position, or else at the center of the
+    // containing block.
+    let start = match (position, offset_starting_position) {
+        (Some(position), _) => super::basic_shapes::position_resolved(Some(position), containing_block_rect),
+        (None, Some(offset_starting_position)) => offset_starting_position,
+        (None, None) => super::basic_shapes::position_resolved(None, containing_block_rect),
+    };
+    let [start_x, start_y] = [start.x.to_float(), start.y.to_float()];
+    let left = containing_block_rect.x.to_float();
+    let top = containing_block_rect.y.to_float();
+    let right = left + containing_block_rect.width.to_float();
+    let bottom = top + containing_block_rect.height.to_float();
+
+    // An angle of 0deg points up, and positive angles increase clockwise.
+    let (direction_x, direction_y) = (angle.sin(), -angle.cos());
+
+    // https://drafts.csswg.org/motion-1/#typedef-ray-size
+    let side_distances = [start_x - left, right - start_x, start_y - top, bottom - start_y].map(f32::abs);
+    let corner_distances = [(left, top), (right, top), (right, bottom), (left, bottom)]
+        .map(|(corner_x, corner_y)| (corner_x - start_x).hypot(corner_y - start_y));
+    let ray_length = match size {
+        keyword::FARTHEST_SIDE => side_distances.into_iter().fold(0.0, f32::max),
+        keyword::CLOSEST_CORNER => corner_distances.into_iter().fold(f32::INFINITY, f32::min),
+        keyword::FARTHEST_CORNER => corner_distances.into_iter().fold(0.0, f32::max),
+        // The distance between the ray's starting point and the point where it intersects the containing block's
+        // boundary. If the starting point is outside the boundary, the length is 0.
+        keyword::SIDES => {
+            if start_x < left || start_x > right || start_y < top || start_y > bottom {
+                0.0
+            } else {
+                let along = |direction: f32, low: f32, high: f32, start: f32| {
+                    if direction > 0.0 {
+                        (high - start) / direction
+                    } else if direction < 0.0 {
+                        (low - start) / direction
+                    } else {
+                        f32::INFINITY
+                    }
+                };
+                along(direction_x, left, right, start_x).min(along(direction_y, top, bottom, start_y))
+            }
+        }
+        _ => side_distances.into_iter().fold(f32::INFINITY, f32::min),
+    };
+
+    // References to <angle> offset paths without contain are unbounded rays: the used offset distance is the offset
+    // distance.
+    let distance = offset_distance_px(offset_distance, ray_length);
+    Some((
+        [start_x + distance * direction_x, start_y + distance * direction_y],
+        angle - std::f32::consts::FRAC_PI_2,
+    ))
+}
+
+// https://drafts.csswg.org/motion-1/#calculating-the-computed-distance-along-a-path
+/// The offset position and path direction, in radians, at the used offset distance along a path.
+fn position_along_path(
+    path: &libgfx_rust::path::OwnedPath,
+    is_closed_loop: bool,
+    offset_distance: &ComputedStyleValueHandle,
+) -> Option<([f32; 2], f32)> {
+    // 1. Let the total length be the total length of offset path with all sub-paths.
+    let total_length = path.length();
+    // 2. Convert offset distance to pixels, with 100% being converted to total length.
+    let distance = offset_distance_px(offset_distance, total_length);
+    let used_distance = if is_closed_loop {
+        // Let used offset distance be equal to offset distance modulo the total length of the path. If the total
+        // length of the path is 0, used offset distance is also 0.
+        if total_length == 0.0 {
+            0.0
+        } else {
+            distance.rem_euclid(total_length)
+        }
+    } else {
+        // Let used offset distance be equal to offset distance clamped by 0 and the total length of the path.
+        distance.clamp(0.0, total_length)
+    };
+    let (position, [tangent_x, tangent_y]) = path.position_and_tangent_at(used_distance)?;
+    Some((position, tangent_y.atan2(tangent_x)))
+}
+
+// https://drafts.csswg.org/motion-1/#offset-transform
+/// The offset transform, relative to the transform origin, of a box with an offset path. It translates the box so
+/// that its anchor point lies on the offset position, and rotates it about that point by offset-rotate.
+// FIXME: Place SVG elements on their offset path, whose reference boxes and containing blocks come from SVG layout.
+fn compute_offset_transform(
+    layout_arena: &impl PaintRead,
+    node: NodeSlotId,
+    style: ComputedValuesView<'_>,
+    reference_box: CssPixelRect,
+    origin_x: CssPixels,
+    origin_y: CssPixels,
+) -> Option<libgfx_rust::FloatMatrix4x4> {
+    use crate::css::calc::ANGLE_UNIT_CANONICAL_RATIOS;
+    use css_enums::keyword;
+
+    let transform_values = style.transform();
+    let offset_path = style_queries::handle_value(&transform_values.offset_path)?;
+    let (path, coord_box) = match offset_path {
+        StyleValueData::ValueList { values, .. } => match values.as_slice() {
+            [path, coord_box] => (Some(path.data()), Some(coord_box.data())),
+            _ => return None,
+        },
+        StyleValueData::Keyword { .. } => (None, Some(offset_path)),
+        path => (Some(path), None),
+    };
+
+    // The <coord-box> of the containing block provides the reference box for the path. If it is omitted, it defaults
+    // to border-box.
+    let containing_block = layout_arena.node_containing_block_if_live(node)?;
+    let containing_block_rect = match coord_box {
+        Some(StyleValueData::Keyword { keyword }) if matches!(*keyword, keyword::CONTENT_BOX | keyword::FILL_BOX) => {
+            paintable_geometry::absolute_rect(layout_arena, containing_block)
+        }
+        Some(StyleValueData::Keyword { keyword }) if *keyword == keyword::PADDING_BOX => {
+            paintable_geometry::absolute_padding_box_rect(layout_arena, containing_block)
+        }
+        _ => paintable_geometry::absolute_border_box_rect(layout_arena, containing_block),
+    };
+
+    // https://drafts.csswg.org/motion-1/#offset-position-property
+    let offset_starting_position = match style_queries::handle_value(&transform_values.offset_position) {
+        // normal: The element does not have an offset starting position.
+        None => None,
+        // auto: The offset starting position is the top-left corner of the box.
+        Some(StyleValueData::Keyword { keyword }) if *keyword == keyword::AUTO => {
+            let border_box = paintable_geometry::absolute_border_box_rect(layout_arena, node);
+            Some(CssPixelPoint::new(border_box.x, border_box.y))
+        }
+        // <position>: The result of using the <position> to position a 0x0 object area within the box's containing
+        // block.
+        Some(position) => Some(super::basic_shapes::position_resolved(
+            Some(position),
+            containing_block_rect,
+        )),
+    };
+
+    let ([position_x, position_y], path_direction) = match path {
+        Some(StyleValueData::Function { name, value }) if name.units().iter().copied().eq("ray".encode_utf16()) => {
+            let StyleValueData::ValueList { values, .. } = value.optional_data()? else {
+                return None;
+            };
+            position_along_ray(
+                values.as_slice(),
+                containing_block_rect,
+                offset_starting_position,
+                &transform_values.offset_distance,
+            )?
+        }
+        Some(shape @ StyleValueData::BasicShape { .. }) => {
+            let shape = shape.basic_shape()?;
+            // A path() without a <coord-box> lays its coordinates out from the box's own position.
+            let path_box = if shape.kind == super::basic_shapes::basic_shape_kind::PATH && coord_box.is_none() {
+                let border_box = paintable_geometry::absolute_border_box_rect(layout_arena, node);
+                CssPixelRect::new(
+                    border_box.x,
+                    border_box.y,
+                    CssPixels::from_raw(0),
+                    CssPixels::from_raw(0),
+                )
+            } else {
+                containing_block_rect
+            };
+            let start_in_path_box = offset_starting_position
+                .map(|position| CssPixelPoint::new(position.x - path_box.x, position.y - path_box.y));
+            let (shape_path, is_closed_loop) =
+                super::basic_shapes::basic_shape_equivalent_path(shape, containing_block_rect, start_in_path_box);
+            let ([x, y], direction) =
+                position_along_path(&shape_path, is_closed_loop, &transform_values.offset_distance)?;
+            ([path_box.x.to_float() + x, path_box.y.to_float() + y], direction)
+        }
+        // If <offset-path> is omitted, it defaults to inset(0 round X), where X is the value of border-radius on the
+        // element that establishes the containing block for this element.
+        // FIXME: Round the corners by the containing block's border-radius.
+        None => {
+            let [left, top] = [containing_block_rect.x.to_float(), containing_block_rect.y.to_float()];
+            let [right, bottom] = [
+                left + containing_block_rect.width.to_float(),
+                top + containing_block_rect.height.to_float(),
+            ];
+            let mut builder = libgfx_rust::path::PathBuilder::new();
+            builder.move_to(left, top);
+            builder.line_to(right, top);
+            builder.line_to(right, bottom);
+            builder.line_to(left, bottom);
+            builder.close();
+            position_along_path(&builder.build(), true, &transform_values.offset_distance)?
+        }
+        // FIXME: Follow a <url> to its SVG shape element's equivalent path.
+        Some(_) => return None,
+    };
+
+    // https://drafts.csswg.org/motion-1/#offset-rotate-property
+    let angle_in_radians = |angle: &StyleValueData| match angle {
+        StyleValueData::Angle { value, unit } => {
+            Some((value * ANGLE_UNIT_CANONICAL_RATIOS[*unit as usize]).to_radians() as f32)
+        }
+        _ => None,
+    };
+    let rotation = match style_queries::handle_value(&transform_values.offset_rotate) {
+        // auto: A rotation equal to the offset path's direction at the offset position.
+        None => path_direction,
+        Some(StyleValueData::Keyword { .. }) => path_direction,
+        // auto <angle>: The angle is added to the rotation component.
+        Some(StyleValueData::ValueList { values, .. }) => {
+            path_direction
+                + values
+                    .as_slice()
+                    .last()
+                    .and_then(|angle| angle_in_radians(angle.data()))?
+        }
+        // <angle>: A rotation of the specified angle.
+        Some(angle) => angle_in_radians(angle)?,
+    };
+
+    // https://drafts.csswg.org/motion-1/#offset-anchor-property
+    let [origin_x, origin_y] = [origin_x.to_float(), origin_y.to_float()];
+    let [anchor_x, anchor_y] = match style_queries::handle_value(&transform_values.offset_anchor) {
+        // auto: The anchor point is the same as the point indicated by transform-origin.
+        None => [origin_x, origin_y],
+        // <position>: The result of resolving the <position> against the element's reference box.
+        Some(position) => {
+            let anchor = super::basic_shapes::position_resolved(
+                Some(position),
+                CssPixelRect::new(
+                    CssPixels::from_raw(0),
+                    CssPixels::from_raw(0),
+                    reference_box.width,
+                    reference_box.height,
+                ),
+            );
+            [anchor.x.to_float(), anchor.y.to_float()]
+        }
+    };
+
+    // https://drafts.csswg.org/motion-1/#calculating-the-offset-transform
+    // The offset transform is a 2d transform, a translation followed by a rotation:
+    // 1. Translate the element by the (X, Y) that aligns its anchor point with its offset position.
+    // 2. Rotate the element by the angle specified by offset-rotate.
+    // NB: The matrix applies about the transform origin, so the rotation happens about the anchor point by
+    //     translating it to the transform origin first.
+    let offset_x = position_x - reference_box.x.to_float();
+    let offset_y = position_y - reference_box.y.to_float();
+    Some(
+        translation_matrix(offset_x - origin_x, offset_y - origin_y, 0.0)
+            .multiplied(libgfx_rust::rotation_matrix([0.0, 0.0, 1.0], rotation))
+            .multiplied(translation_matrix(origin_x - anchor_x, origin_y - anchor_y, 0.0)),
+    )
+}
+
 // https://drafts.csswg.org/css-transforms-2/#ctm
 pub(crate) fn compute_transform(
     layout_arena: &impl PaintRead,
@@ -150,7 +444,8 @@ pub(crate) fn compute_transform(
     };
 
     let transform_values = style.transform();
-    let style_has_transform = transform_values.resolved_transforms.length != 0;
+    let style_has_transform =
+        transform_values.resolved_transforms.length != 0 || !transform_values.offset_path.pointer.is_null();
     let has_transform_node_input = style_has_transform
         || additional_element_transform.is_some()
         || style_queries::will_change_promotes_transform_node(style);
@@ -177,15 +472,34 @@ pub(crate) fn compute_transform(
     // 3. Translate by the computed X, Y, and Z values of translate.
     // 4. Rotate by the computed <angle> about the specified axis of rotate.
     // 5. Scale by the computed X, Y, and Z values of scale.
-    // FIXME: 6. Translate and rotate by the transform specified by offset.
+    // 6. Translate and rotate by the transform specified by offset.
     // 7. Multiply by each of the transform functions in transform from left to right.
     // NB: The resolved transform list carries translate, rotate, scale, and the
-    //     transform functions pre-lowered in exactly that order.
+    //     transform functions pre-lowered in exactly that order, so the offset
+    //     transform goes after the entries of the individual transform properties.
+    let individual_transform_count = [
+        &transform_values.translate,
+        &transform_values.rotate,
+        &transform_values.scale,
+    ]
+    .into_iter()
+    .filter(|handle| !handle.pointer.is_null())
+    .count();
+    let (individual_transforms, transform_functions) = transform_values
+        .resolved_transforms
+        .as_slice()
+        .split_at(individual_transform_count);
     let mut matrix = multiply_transform_functions(
         translation_matrix(0.0, 0.0, origin_z),
-        transform_values.resolved_transforms.as_slice(),
+        individual_transforms,
         reference_box,
     );
+    if let Some(offset_transform) =
+        compute_offset_transform(layout_arena, node, style, reference_box, origin_x, origin_y)
+    {
+        matrix = matrix.multiplied(offset_transform);
+    }
+    matrix = multiply_transform_functions(matrix, transform_functions, reference_box);
 
     // The x and y properties of <use> define an additional translation applied after any
     // transformations specified with other properties.

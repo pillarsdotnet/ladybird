@@ -605,6 +605,7 @@ public:
     bool has_rotate() const { return rotate() != nullptr; }
     bool has_translate() const { return translate() != nullptr; }
     bool has_scale() const { return scale() != nullptr; }
+    bool has_offset_path() const { return style_group<CSS::ComputedValues::TransformValues>().offset_path.pointer; }
     Optional<CSSPixels> perspective() const { return style_group<CSS::ComputedValues::TransformValues>().perspective_value(); }
     Optional<CSS::MaskReference> mask() const { return style_group<CSS::ComputedValues::MaskValues>().mask_value(); }
     CSS::MaskType mask_type() const { return style_group<CSS::ComputedValues::MaskValues>().mask_type_value(); }

@@ -1038,6 +1038,7 @@ public:
     bool has_rotate() const { return rotate() != nullptr; }
     bool has_translate() const { return translate() != nullptr; }
     bool has_scale() const { return scale() != nullptr; }
+    bool has_offset_path() const { return m_noninherited.transform->offset_path.pointer; }
     Optional<CSSPixels> perspective() const { return m_noninherited.transform->perspective_value(); }
 
     Gfx::FontCascadeList const& font_list() const { return m_inherited.font->font_list_value(); }

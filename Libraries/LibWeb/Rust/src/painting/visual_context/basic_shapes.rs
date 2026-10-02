@@ -16,7 +16,7 @@ use crate::painting::{paintable_geometry, style_queries};
 use libgfx_rust::WindingRule;
 use libgfx_rust::path::{OwnedPath, PathBuilder};
 
-mod basic_shape_kind {
+pub(crate) mod basic_shape_kind {
     pub const INSET: u8 = 0;
     pub const CIRCLE: u8 = 3;
     pub const ELLIPSE: u8 = 4;
@@ -135,10 +135,23 @@ pub(crate) fn resolve_circle_size(
     center: CssPixelPoint,
     reference_box: CssPixelRect,
 ) -> CssPixels {
+    let resolved_size = resolve_circle_size_allowing_zero(radius, center, reference_box);
+    if resolved_size == CssPixels::from_raw(0) {
+        return CssPixels::from_raw(1);
+    }
+    resolved_size
+}
+
+/// The circle's radius, which is zero when its center lies on the reference box's edge and the size is closest-side.
+fn resolve_circle_size_allowing_zero(
+    radius: &StyleValueData,
+    center: CssPixelPoint,
+    reference_box: CssPixelRect,
+) -> CssPixels {
     let components = radial_size_components(radius);
     assert!(components.len() == 1);
     let component = &components[0];
-    let resolved_size = if component.is_extent {
+    if component.is_extent {
         match component.extent {
             radial_extent::CLOSEST_SIDE => {
                 let side_distances = side_shape(center, reference_box, true);
@@ -162,11 +175,7 @@ pub(crate) fn resolve_circle_size(
                 .to_float()
                 .max(0.0),
         )
-    };
-    if resolved_size == CssPixels::from_raw(0) {
-        return CssPixels::from_raw(1);
     }
-    resolved_size
 }
 
 fn ellipse_corner_shape(center: CssPixelPoint, reference_box: CssPixelRect, take_farthest: bool) -> CssPixelSize {
@@ -192,6 +201,26 @@ pub(crate) fn resolve_ellipse_size(
     center: CssPixelPoint,
     reference_box: CssPixelRect,
 ) -> CssPixelSize {
+    let resolved_size = resolve_ellipse_size_allowing_zero(radius, center, reference_box);
+    let zero = CssPixels::from_raw(0);
+    let arbitrary_small_number = CssPixels::from_raw(1);
+    let arbitrary_large_number = CssPixels::from_raw(i32::MAX);
+    if resolved_size.width <= zero {
+        return CssPixelSize::new(arbitrary_small_number, arbitrary_large_number);
+    }
+    if resolved_size.height <= zero {
+        return CssPixelSize::new(arbitrary_large_number, arbitrary_small_number);
+    }
+    resolved_size
+}
+
+/// The ellipse's radii, either of which is zero when its center lies on the reference box's edge and the size is
+/// closest-side.
+fn resolve_ellipse_size_allowing_zero(
+    radius: &StyleValueData,
+    center: CssPixelPoint,
+    reference_box: CssPixelRect,
+) -> CssPixelSize {
     let components = radial_size_components(radius);
     assert!(components.len() == 1 || components.len() == 2);
     let resolve_component = |component: &RadialSizeComponent<'_>, reference_size: CssPixels| -> CssPixelSize {
@@ -208,20 +237,10 @@ pub(crate) fn resolve_ellipse_size(
             CssPixelSize::new(value, value)
         }
     };
-    let resolved_size = CssPixelSize::new(
+    CssPixelSize::new(
         resolve_component(&components[0], reference_box.width).width,
         resolve_component(components.last().unwrap(), reference_box.height).height,
-    );
-    let zero = CssPixels::from_raw(0);
-    let arbitrary_small_number = CssPixels::from_raw(1);
-    let arbitrary_large_number = CssPixels::from_raw(i32::MAX);
-    if resolved_size.width <= zero {
-        return CssPixelSize::new(arbitrary_small_number, arbitrary_large_number);
-    }
-    if resolved_size.height <= zero {
-        return CssPixelSize::new(arbitrary_large_number, arbitrary_small_number);
-    }
-    resolved_size
+    )
 }
 
 pub(crate) fn position_resolved(position: Option<&StyleValueData>, rect: CssPixelRect) -> CssPixelPoint {
@@ -410,6 +429,80 @@ fn polygon_to_path(points: &crate::css::style_value::RetainedShapePointList, ref
     }
     path.close();
     path.build()
+}
+
+// https://drafts.csswg.org/motion-1/#basic-shape-equivalent-path
+/// The equivalent path of a basic shape used as an offset path, relative to the reference box, and whether that path
+/// is a closed loop. A circle or ellipse without "at <position>" is centered on the offset starting position, when
+/// the element has one.
+pub(crate) fn basic_shape_equivalent_path(
+    shape: &BasicShapeData,
+    reference_box: CssPixelRect,
+    offset_starting_position: Option<CssPixelPoint>,
+) -> (OwnedPath, bool) {
+    let BasicShapeData {
+        kind,
+        v0,
+        v1,
+        v2,
+        v3,
+        v4,
+        points,
+        path,
+        ..
+    } = shape;
+    let reference_box = CssPixelRect::new(
+        CssPixels::from_raw(0),
+        CssPixels::from_raw(0),
+        reference_box.width,
+        reference_box.height,
+    );
+    match *kind {
+        // The path is the outline of the (possibly-rounded) rectangle, [...] It starts at the left end of the top
+        // straight edge, immediately to the right of any rounded corners, and continues to the right (clockwise).
+        basic_shape_kind::INSET => (inset_to_path(v0, v1, v2, v3, v4, reference_box), true),
+        // The path is the outline of the circle/ellipse. It starts at the rightmost point of the circle/ellipse, and
+        // then is composed of four circular arcs, each comprising a quarter of the circle/ellipse, proceeding
+        // clockwise, ending with a segment-completing close path operation.
+        basic_shape_kind::CIRCLE | basic_shape_kind::ELLIPSE => {
+            let explicit_position = v1
+                .optional_data()
+                .filter(|value| matches!(value, StyleValueData::Position { .. }));
+            let center = match (explicit_position, offset_starting_position) {
+                (None, Some(offset_starting_position)) => offset_starting_position,
+                _ => position_resolved(explicit_position, reference_box),
+            };
+            let (radius_x, radius_y) = if *kind == basic_shape_kind::CIRCLE {
+                let radius = resolve_circle_size_allowing_zero(v0.data(), center, reference_box).to_float();
+                (radius, radius)
+            } else {
+                let size = resolve_ellipse_size_allowing_zero(v0.data(), center, reference_box);
+                (size.width.to_float(), size.height.to_float())
+            };
+            let (center_x, center_y) = (center.x.to_float(), center.y.to_float());
+            let mut builder = PathBuilder::new();
+            builder.move_to(center_x + radius_x, center_y);
+            builder.elliptical_arc_to(center_x, center_y + radius_y, radius_x, radius_y, 0.0, false, true);
+            builder.elliptical_arc_to(center_x - radius_x, center_y, radius_x, radius_y, 0.0, false, true);
+            builder.elliptical_arc_to(center_x, center_y - radius_y, radius_x, radius_y, 0.0, false, true);
+            builder.elliptical_arc_to(center_x + radius_x, center_y, radius_x, radius_y, 0.0, false, true);
+            builder.close();
+            (builder.build(), true)
+        }
+        basic_shape_kind::POLYGON => (polygon_to_path(points, reference_box), true),
+        // Offset paths (including references to SVG Paths) are closed loops only if the final command in the path
+        // list is a closepath command ("z" or "Z"), otherwise they are unclosed intervals.
+        basic_shape_kind::PATH => {
+            let is_closed = path
+                .units()
+                .iter()
+                .rev()
+                .find(|&&unit| unit != u16::from(b' '))
+                .is_some_and(|&unit| unit == u16::from(b'Z') || unit == u16::from(b'z'));
+            (path.to_gfx_path(), is_closed)
+        }
+        _ => unreachable!("computed offset-path basic shape holds an unlowered kind"),
+    }
 }
 
 pub(crate) fn compute_basic_shape_clip_path_data(

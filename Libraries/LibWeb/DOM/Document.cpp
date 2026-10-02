@@ -7293,6 +7293,7 @@ static Painting::CompositorAnimationEffectState::BuildOutcome build_compositor_a
             || (!effect.target_properties().contains(CSS::PropertyNameAndID::from_id(CSS::PropertyID::Rotate)) && layout_node->has_rotate())
             || (!effect.target_properties().contains(CSS::PropertyNameAndID::from_id(CSS::PropertyID::Scale)) && layout_node->has_scale())
             || (!effect.target_properties().contains(CSS::PropertyNameAndID::from_id(CSS::PropertyID::Transform)) && layout_node->has_transformations())
+            || layout_node->has_offset_path()
             || layout_node->transform_origin().z.to_px(CSSPixels { 0 }) != CSSPixels { 0 })
             return {};
     }
@@ -7483,7 +7484,8 @@ void Document::update_compositor_animations()
     }
 
     auto transform_preserves_horizontal_axis = [](Layout::NodeWithStyle const& layout_node) {
-        if (layout_node.perspective().has_value())
+        // FIXME: Account for the offset transform, which can rotate the box along its offset path.
+        if (layout_node.perspective().has_value() || layout_node.has_offset_path())
             return false;
 
         auto matrix = Gfx::FloatMatrix4x4::identity();
