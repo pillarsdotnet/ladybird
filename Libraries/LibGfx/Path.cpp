@@ -25,6 +25,7 @@ void ladybird_gfx_path_append_svg_string(void const*, void (*)(void*, char const
 void ladybird_gfx_path_bounding_box(void const*, float*);
 void ladybird_gfx_path_serialize(void const*, void (*)(void*, u8 const*, size_t), void*);
 float ladybird_gfx_path_length(void const*);
+bool ladybird_gfx_path_position_and_tangent_at(void const*, float distance, float* out);
 void* ladybird_gfx_path_create_from_ops(u8 const* kinds, float const* values, size_t count);
 void* ladybird_gfx_path_create_from_serialized_bytes(u8 const* bytes, size_t count);
 void* ladybird_gfx_path_copy_transformed(void const*, float const* affine_values);
@@ -103,6 +104,19 @@ extern "C" void ladybird_gfx_path_serialize(void const* path, void (*append)(voi
 extern "C" float ladybird_gfx_path_length(void const* path)
 {
     return static_cast<Gfx::Path const*>(path)->length();
+}
+
+// Writes the position's x and y, then the tangent's, to the four floats at out.
+extern "C" bool ladybird_gfx_path_position_and_tangent_at(void const* path, float distance, float* out)
+{
+    auto result = static_cast<Gfx::Path const*>(path)->position_and_tangent_at(distance);
+    if (!result.has_value())
+        return false;
+    out[0] = result->position.x();
+    out[1] = result->position.y();
+    out[2] = result->tangent.x();
+    out[3] = result->tangent.y();
+    return true;
 }
 
 enum class PathBuilderOpKind : u8 {

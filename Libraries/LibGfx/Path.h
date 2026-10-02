@@ -8,6 +8,7 @@
 
 #include <AK/Forward.h>
 #include <AK/NonnullOwnPtr.h>
+#include <AK/Optional.h>
 #include <AK/String.h>
 #include <AK/Vector.h>
 #include <AK/kmalloc.h>
@@ -19,6 +20,11 @@
 #include <LibIPC/Forward.h>
 
 namespace Gfx {
+
+struct PathPositionAndTangent {
+    FloatPoint position;
+    FloatPoint tangent;
+};
 
 class PathImpl {
 public:
@@ -49,6 +55,7 @@ public:
     virtual Gfx::FloatPoint last_point() const = 0;
     virtual Gfx::FloatRect bounding_box() const = 0;
     virtual float length() const = 0;
+    virtual Optional<PathPositionAndTangent> position_and_tangent_at(float distance) const = 0;
     virtual void set_fill_type(Gfx::WindingRule winding_rule) = 0;
     virtual bool contains(FloatPoint point, Gfx::WindingRule) const = 0;
 
@@ -118,6 +125,7 @@ public:
     Gfx::FloatPoint last_point() const { return impl().last_point(); }
     Gfx::FloatRect bounding_box() const { return impl().bounding_box(); }
     float length() const { return impl().length(); }
+    Optional<PathPositionAndTangent> position_and_tangent_at(float distance) const { return impl().position_and_tangent_at(distance); }
     bool contains(FloatPoint point, Gfx::WindingRule winding_rule) const { return impl().contains(point, winding_rule); }
     void set_fill_type(Gfx::WindingRule winding_rule) { impl().set_fill_type(winding_rule); }
 

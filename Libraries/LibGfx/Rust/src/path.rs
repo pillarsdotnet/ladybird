@@ -26,6 +26,7 @@ unsafe extern "C" {
     );
     fn ladybird_gfx_path_contains(path: *const c_void, x: f32, y: f32, winding_rule: i32) -> bool;
     fn ladybird_gfx_path_length(path: *const c_void) -> f32;
+    fn ladybird_gfx_path_position_and_tangent_at(path: *const c_void, distance: f32, out: *mut f32) -> bool;
     fn ladybird_gfx_path_create_from_ops(kinds: *const u8, values: *const f32, count: usize) -> *mut c_void;
     fn ladybird_gfx_path_create_from_serialized_bytes(bytes: *const u8, count: usize) -> *mut c_void;
     fn ladybird_gfx_path_copy_transformed(path: *const c_void, affine_values: *const f32) -> *mut c_void;
@@ -267,6 +268,15 @@ impl OwnedPath {
     pub fn length(&self) -> f32 {
         // SAFETY: The path is live for the duration of the call.
         unsafe { ladybird_gfx_path_length(self.raw.as_ptr()) }
+    }
+
+    /// The point at `distance` along the path, and the path's direction there, as `([x, y], [dx, dy])`. The
+    /// distance runs across every contour in turn, and a distance beyond the end lands on the end.
+    pub fn position_and_tangent_at(&self, distance: f32) -> Option<([f32; 2], [f32; 2])> {
+        let mut out = [0.0f32; 4];
+        // SAFETY: The path is live for the duration of the call; the out-array holds four floats.
+        let found = unsafe { ladybird_gfx_path_position_and_tangent_at(self.raw.as_ptr(), distance, out.as_mut_ptr()) };
+        found.then_some(([out[0], out[1]], [out[2], out[3]]))
     }
 
     pub fn copy_transformed(&self, affine_values: [f32; 6]) -> OwnedPath {

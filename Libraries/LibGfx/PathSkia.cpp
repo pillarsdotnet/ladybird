@@ -319,6 +319,36 @@ float PathImplSkia::length() const
     return length;
 }
 
+Optional<PathPositionAndTangent> PathImplSkia::position_and_tangent_at(float distance) const
+{
+    // The distance runs across every contour in turn, as length() measures them. A distance beyond the end lands on
+    // the end of the last contour.
+    Vector<float> contour_lengths;
+    SkPathMeasure length_measure(sk_path(), false);
+    do {
+        contour_lengths.append(length_measure.getLength());
+    } while (length_measure.nextContour());
+
+    SkPathMeasure path_measure(sk_path(), false);
+    for (size_t index = 0; index < contour_lengths.size(); ++index) {
+        auto contour_length = contour_lengths[index];
+        if (distance <= contour_length || index == contour_lengths.size() - 1) {
+            SkPoint position;
+            SkVector tangent;
+            if (path_measure.getPosTan(clamp(distance, 0.0f, contour_length), &position, &tangent))
+                return PathPositionAndTangent { { position.x(), position.y() }, { tangent.x(), tangent.y() } };
+            // A path without length has no direction, but its every distance still lies on its first point.
+            if (sk_path().countPoints() == 0)
+                return {};
+            auto first_point = sk_path().getPoint(0);
+            return PathPositionAndTangent { { first_point.x(), first_point.y() }, { 1, 0 } };
+        }
+        distance -= contour_length;
+        path_measure.nextContour();
+    }
+    return {};
+}
+
 bool PathImplSkia::contains(FloatPoint point, Gfx::WindingRule winding_rule) const
 {
     SkPath temp_path = sk_path();
