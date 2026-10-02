@@ -2060,8 +2060,9 @@ pub(crate) fn serialize_style_value(sink: &mut TextSink, value: &StyleValueData,
                 }
                 _ => {
                     sink.push_ascii("path(");
-                    if !(mode.is_resolved() && *fill_rule == 0) {
-                        sink.push_ascii(if *fill_rule == 0 { "nonzero, " } else { "evenodd, " });
+                    // nonzero is the default <fill-rule>, so it is omitted to give the shortest serialization.
+                    if *fill_rule != 0 {
+                        sink.push_ascii("evenodd, ");
                     }
                     serialize_a_string(sink, &StringUnits::Utf16(path.units()));
                     sink.push_ascii(")");
